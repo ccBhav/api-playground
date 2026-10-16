@@ -1,0 +1,12 @@
+{
+  "name": "wagepoint-playground",
+  "private": true,
+  "description": "Example app that runs the Wagepoint SDK against real Wagepoint",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env runner/index.js",
+    "test": "npm --prefix sdk test"
+  }
+}

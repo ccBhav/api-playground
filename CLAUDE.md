@@ -18,6 +18,11 @@ Two tools are used side by side per API directory:
 ## Structure
 
 - `quickbooks/` — QuickBooks API exploration (currently empty; first integration to be built out)
+- `wagepoint/` — Wagepoint Public API, same layout and conventions as `myob/`: `sdk/` (CommonJS, JSDoc,
+  zero-dependency) and `runner/index.js` (`npm start`). Auth is the OAuth2 client credentials grant, so
+  there is no redirect/ngrok step. Built from Wagepoint's PDF quick start (companies, persons, time
+  entries); guesses beyond it are marked in `wagepoint/sdk/README.md`. Setup walkthrough:
+  `wagepoint/SETUP_TUTORIAL.md`.
 
 As new product APIs are added, expect a new top-level directory per product, each containing its own
 Python scripts and Bruno collection.

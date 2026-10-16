@@ -1,0 +1,16 @@
+{
+  "name": "myob-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Small MYOB AccountRight / Business API client for Node",
+  "main": "index.js",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.15"
+  }
+}

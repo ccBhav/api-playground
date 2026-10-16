@@ -1,0 +1,13 @@
+{
+  "name": "myob-playground",
+  "private": true,
+  "description": "Example app that runs the MYOB SDK against real MYOB",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node --env-file-if-exists=.env runner/index.js",
+    "start:ngrok": "./runner/ngrok.sh",
+    "test": "npm --prefix sdk test"
+  }
+}

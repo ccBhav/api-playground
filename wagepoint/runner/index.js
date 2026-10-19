@@ -70,11 +70,26 @@ const getConnection = async () => {
   return connection;
 };
 
-const clientFor = async (state) =>
+/**
+ * Records the URL and body of each POST to the API into `sent`, so the page can show what was sent.
+ * Only the API client uses this, not auth, so the token request (which carries the client secret)
+ * is never recorded.
+ * @param {{ url: string, body: unknown }[]} sent
+ * @returns {typeof fetch}
+ */
+const recordingFetch = (sent) => (url, init = {}) => {
+  if (init.method === "POST") {
+    sent.push({ url: String(url), body: init.body === undefined ? undefined : JSON.parse(init.body) });
+  }
+  return fetch(url, init);
+};
+
+const clientFor = async (state, sent = []) =>
   createWagepointClient({
     connection: await getConnection(),
     companyId: state.companyId ?? process.env.WAGEPOINT_COMPANY_ID ?? undefined,
     baseUrl,
+    fetch: recordingFetch(sent),
   });
 
 // --- HTML -------------------------------------------------------------------------------------
@@ -129,6 +144,17 @@ const errorHtml = (error) => {
   }
   return `<pre class="error">${esc(error.stack ?? error)}</pre>`;
 };
+
+/** The POSTs recorded by `recordingFetch`; more than one means the SDK retried. */
+const sentHtml = (sent) =>
+  sent.length
+    ? `<h2>Sent to Wagepoint</h2>${sent
+        .map(
+          ({ url, body }) =>
+            `<p><code>POST ${esc(url)}</code></p>${body === undefined ? "" : `<pre>${esc(JSON.stringify(body, null, 2))}</pre>`}`,
+        )
+        .join("")}`
+    : "";
 
 const noCompany = (res) =>
   send(res, 200, page("No company selected", `<p><a class="button" href="/companies">Pick a company</a></p>`));
@@ -282,7 +308,8 @@ const routes = {
   },
 
   "POST /time-entries": async (req, res, { state }) => {
-    const api = await clientFor(state);
+    const sent = [];
+    const api = await clientFor(state, sent);
     if (!api.companyId) return noCompany(res);
     const form = await readForm(req);
     const entry = {
@@ -291,9 +318,17 @@ const routes = {
       hours: Number(form.get("hours")),
       notes: form.get("notes") || undefined,
     };
-    const { items, idempotencyKey } = await api.createTimeEntries([entry], {
-      idempotencyKey: form.get("idempotency_key") || undefined,
-    });
+    let created;
+    try {
+      created = await api.createTimeEntries([entry], {
+        idempotencyKey: form.get("idempotency_key") || undefined,
+      });
+    } catch (error) {
+      console.error(error);
+      const status = error instanceof WagepointApiError ? 502 : 500;
+      return send(res, status, page("Something went wrong", `${errorHtml(error)}${sentHtml(sent)}`));
+    }
+    const { items, idempotencyKey } = created;
     const verify = `/time-entries?from_date=${encodeURIComponent(entry.work_date)}&to_date=${encodeURIComponent(entry.work_date)}&person_id=${encodeURIComponent(entry.person_id)}`;
     send(
       res,
@@ -302,7 +337,8 @@ const routes = {
         "Time entry created",
         `<p class="muted">Idempotency-Key: <code>${esc(idempotencyKey)}</code></p>
         <pre>${esc(JSON.stringify(items, null, 2))}</pre>
-        <p><a class="button" href="${esc(verify)}">Read it back</a></p>`,
+        <p><a class="button" href="${esc(verify)}">Read it back</a></p>
+        ${sentHtml(sent)}`,
       ),
     );
   },

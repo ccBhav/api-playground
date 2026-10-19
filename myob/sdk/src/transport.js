@@ -1,5 +1,5 @@
 const { version } = require("../package.json");
-const { MyobAbortError, MyobConnectionError, MyobTimeoutError } = require("./errors");
+const { MyobAbortError, MyobConnectionError, MyobTimeoutError, withoutQuery } = require("./errors");
 
 const USER_AGENT = `myob-sdk/${version} node/${process.versions.node}`;
 
@@ -27,7 +27,7 @@ const MAX_RETRY_AFTER_MS = 60_000;
 const fetchWithTimeout = async (fetchImpl, url, init, { timeoutMs, signal }) => {
   const timeout = AbortSignal.timeout(timeoutMs);
   const combined = signal ? AbortSignal.any([signal, timeout]) : timeout;
-  const where = `MYOB ${init.method} ${url}`;
+  const where = `MYOB ${init.method} ${withoutQuery(url)}`;
   if (signal?.aborted) {
     throw new MyobAbortError(`${where} was aborted`, { cause: signal.reason });
   }

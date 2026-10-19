@@ -13,6 +13,13 @@ const { DEFAULT_EXPIRY_SKEW_SECONDS, DEFAULT_TOKEN_LIFETIME_SECONDS } = require(
  */
 
 /**
+ * Tokens as you hand them back to the SDK from storage: like {@link MyobTokens}, but every field is
+ * optional and `expiresAt` may be whatever your database returns (a Date, an ISO string or epoch ms).
+ *
+ * @typedef {Omit<Partial<MyobTokens>, "expiresAt"> & { expiresAt?: Date | string | number | null }} StoredMyobTokens
+ */
+
+/**
  * Convert MYOB's token response into {@link MyobTokens}.
  * @param {Record<string, any>} raw - JSON body from the token endpoint.
  * @param {number} [now] - Epoch ms the response was received.
@@ -33,7 +40,7 @@ const toTokens = (raw, now = Date.now()) => {
 
 /**
  * True when the access token is missing, expired, or within `skewSeconds` of expiring.
- * @param {Partial<MyobTokens> | null | undefined} tokens
+ * @param {StoredMyobTokens | null | undefined} tokens
  * @param {{ skewSeconds?: number, now?: number }} [options]
  */
 const isExpired = (
@@ -46,4 +53,16 @@ const isExpired = (
   return expiresAt - skewSeconds * 1000 <= now;
 };
 
-module.exports = { toTokens, isExpired };
+/**
+ * Stored tokens with `expiresAt` turned into a Date (epoch 0, i.e. expired, when missing or
+ * invalid), so the SDK only ever hands out {@link MyobTokens}. Other fields are kept.
+ * @template {StoredMyobTokens} T
+ * @param {T} stored
+ * @returns {Omit<T, "expiresAt"> & MyobTokens}
+ */
+const fromStored = (stored) => {
+  const time = stored.expiresAt ? new Date(stored.expiresAt).getTime() : 0;
+  return /** @type {any} */ ({ ...stored, expiresAt: new Date(Number.isNaN(time) ? 0 : time) });
+};
+
+module.exports = { toTokens, isExpired, fromStored };

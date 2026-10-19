@@ -16,7 +16,7 @@ export type MyobRecord = {
     [field: string]: unknown;
 };
 /**
- * A company file from `listCompanyFiles()`.
+ * A company file from `companyFiles.list()`.
  */
 export type MyobCompanyFile = {
     Id: string;
@@ -67,15 +67,18 @@ export type ResponseContext = RequestContext & {
     durationMs: number;
 };
 /**
- * No response: connection error, timeout or abort.
+ * No response: connection error, timeout or abort, or the attempt failed before it was sent (the
+ * access token couldn't be refreshed, or the caller aborted while waiting for a rate-limit slot).
+ * `error` is the error the call throws: a `MyobError`, or whatever your `onRefresh` threw.
  */
 export type ErrorContext = RequestContext & {
-    error: MyobError;
+    error: Error;
     durationMs: number;
 };
 /**
- * Observability hooks, called for every attempt (retries included). Their return values are
- * ignored, and an exception in one is logged as a warning instead of failing the request.
+ * Observability hooks, called for every attempt (retries included). `onRequest` fires first, then
+ * exactly one of `onResponse` or `onError`. Their return values are ignored, and an exception in
+ * one is logged as a warning instead of failing the request.
  */
 export type MyobHooks = {
     onRequest?: ((context: RequestContext) => unknown) | undefined;
@@ -128,6 +131,11 @@ export type Page<T = MyobRecord> = {
      * - Absolute URL of the next page, or null on the last one.
      */
     nextPageLink: string | null;
+    /**
+     * - Fetch the next page (with the same request
+     * options), or null on the last one.
+     */
+    nextPage: () => Promise<Page<T> | null>;
     response: RawResponse;
 };
 export type CreateResult<T = MyobRecord> = {
@@ -196,7 +204,9 @@ export type MyobClientConfig = {
      * - Stored tokens; their
      * `businessId` is used when `businessId` isn't given.
      */
-    tokens?: (Partial<import("./tokens").MyobTokens> & {
+    tokens?: (Omit<Partial<import("./tokens").MyobTokens>, "expiresAt"> & {
+        expiresAt?: Date | string | number | null;
+    } & {
         businessId?: string;
     }) | undefined;
     /**
@@ -216,7 +226,7 @@ export type MyobClientConfig = {
      */
     withRefreshLock?: import("./auth").ConnectOptions["withRefreshLock"];
     /**
-     * - The company file. Needed for everything except `listCompanyFiles`.
+     * - The company file. Needed for everything except `companyFiles.list`.
      */
     businessId?: string | undefined;
     /**
@@ -271,6 +281,14 @@ export function createMyobClient(config: MyobClientConfig): {
          * @returns {Promise<Company>}
          */
         retrieve: (options?: RequestOptions) => Promise<Company>;
+    };
+    companyFiles: {
+        /**
+         * Company files this login can see. Doesn't need `businessId`.
+         * @param {RequestOptions} [options]
+         * @returns {Promise<MyobCompanyFile[]>}
+         */
+        list: (options?: RequestOptions) => Promise<MyobCompanyFile[]>;
     };
     request: <T = unknown>(method: string, path: string, options?: {
         query?: Record<string, unknown>;

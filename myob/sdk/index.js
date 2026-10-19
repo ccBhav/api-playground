@@ -46,6 +46,7 @@ const { isExpired } = require("./src/tokens");
 /** @typedef {import("./src/errors").MyobErrorDetail} MyobErrorDetail */
 /** @typedef {import("./src/options").MyobLogger} MyobLogger */
 /** @typedef {import("./src/tokens").MyobTokens} MyobTokens */
+/** @typedef {import("./src/tokens").StoredMyobTokens} StoredMyobTokens */
 /** @typedef {import("./src/rateLimiter").RateLimiter} RateLimiter */
 /** @typedef {import("./src/rateLimiter").RateLimitOptions} RateLimitOptions */
 /** @typedef {import("./src/rateLimiter").RateLimitSetting} RateLimitSetting */

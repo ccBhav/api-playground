@@ -40,6 +40,14 @@
 - `appName` option, appended to the `User-Agent`.
 - `myob-sdk/testing`: `createMockMyob()` (a real client over a fake `fetch`, with handlers per
   operation) and seeded `createFactories()`.
+- `page.nextPage()` on every `list()` page, typed like the page, for paging one page at a time.
+- `api.companyFiles.list()`, matching the mock's `companyFiles.list` operation.
+- `StoredMyobTokens`, the input type for stored tokens: `expiresAt` may be a Date, ISO string or
+  epoch ms, so tokens read from JSON type-check without a cast.
+- `reconnectRequired` and `retryable` on `MyobAuthError`, so an OAuth server outage can be told
+  apart from a dead refresh token. A missing refresh token now has code `no_refresh_token`.
+- A warning when a list query key looks like a misspelt OData option or is a request option.
+- `mock.onRequest(method, path)` in `myob-sdk/testing`, for paths used through the generic methods.
 - An opt-in, read-only live smoke test (`npm run test:live`), and CI that also checks the committed
   `types/` matches the source.
 
@@ -55,6 +63,20 @@
   and paging work against a local mock server.
 - A custom `fetch` that throws a `TimeoutError` gives `MyobTimeoutError`.
 - Supported Node versions widened from ≥ 24 to ≥ 20.3.
+
+- `hooks.onError` also fires when an attempt fails before it is sent (a token refresh MYOB refused,
+  or an abort while waiting for a rate-limit slot). `ErrorContext.error` is typed `Error`.
+- Stored tokens are normalised on `connect`: `getTokens().expiresAt` is always a Date.
+- Error messages leave out the URL's query string (`$filter` values can hold personal data);
+  `error.url` still has it.
+- A 501 is no longer retryable.
+- Headers are merged case-insensitively, so a per-request `user-agent` replaces the SDK's.
+- `timesheets.update` throws a `TypeError` if the timesheet has no `StartDate`/`EndDate`.
+- An unmatched request in `myob-sdk/testing` gets a 501 response instead of surfacing as a
+  `MyobConnectionError`.
+
+### Deprecated
+- `api.listCompanyFiles()`: use `api.companyFiles.list()`. Removed in 1.0.
 
 ### Removed
 - `getById`: use `retrieve`. `remove`: use `delete`. `myob.isExpired`: use the top-level `isExpired`.

@@ -45,6 +45,18 @@ async function main(): Promise<void> {
   await api.timesheets.list({ top: 5 });
   const companyName: string | undefined = (await api.company.retrieve()).Name;
 
+  // Tokens as stored (expiresAt as a string), typed paging, company files, auth errors
+  const stored = { accessToken: "a", refreshToken: "r", expiresAt: "2026-10-19T00:00:00Z", businessId: "b" };
+  const fromStorage = myob.createMyobClient({ auth, tokens: stored, loadTokens: async () => stored });
+  const expiresAt: Date = fromStorage.connection.getTokens().expiresAt;
+  const nextEmployees: Page<Employee> | null = await employees.nextPage();
+  const files: { Id: string }[] = await api.companyFiles.list();
+  try {
+    await auth.refresh("r");
+  } catch (error) {
+    if (error instanceof myob.MyobAuthError && (error.reconnectRequired || error.retryable)) void error.code;
+  }
+
   // Generics on the generic methods
   const typed: Employee = await api.retrieve<Employee>(myob.RESOURCES.EMPLOYEES, "uid");
   const raw = await api.request<{ Name: string }>("GET", myob.RESOURCES.COMPANY);
@@ -69,8 +81,9 @@ async function main(): Promise<void> {
   mock.on("employees.list").replyPages([[fake.employee()], [fake.employee({ FirstName: "Ana" })]]);
   mock.on("customers.retrieve").replyError(404, { name: "ResourceNotFound" });
   const mocked: Employee[] = await client.employees.all();
+  mock.onRequest("GET", "Sale/Order/Item").reply(200, { Items: [] });
 
-  void [status, firstName, companyName, typed, name, unknownBody, mocked];
+  void [status, firstName, companyName, typed, name, unknownBody, mocked, expiresAt, nextEmployees, files];
 }
 
 void main;

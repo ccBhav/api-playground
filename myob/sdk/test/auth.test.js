@@ -297,6 +297,17 @@ describe("connect", () => {
     const conn = myob.connect({ tokens: { ...expired, refreshToken: undefined } });
 
     await expect(conn.getAccessToken()).rejects.toBeInstanceOf(MyobAuthError);
+    await expect(conn.getAccessToken()).rejects.toMatchObject({ reconnectRequired: true });
+  });
+
+  test("accepts expiresAt as stored (ISO string) and hands back a Date", async () => {
+    const { myob, fetch } = setup();
+
+    const conn = myob.connect({ tokens: { ...fresh, expiresAt: fresh.expiresAt.toISOString() } });
+
+    expect(await conn.getAccessToken()).toBe("stored-access");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(conn.getTokens().expiresAt).toEqual(fresh.expiresAt);
   });
 });
 
@@ -368,6 +379,21 @@ describe("hardening", () => {
       .headers();
 
     expect(headers["x-myobapi-version"]).toBe("v3");
+  });
+});
+
+describe("MyobAuthError flags", () => {
+  test("invalid_grant needs a reconnect; a 5xx from the OAuth server is retryable", async () => {
+    const { myob } = setup(
+      jsonResponse(400, { error: "invalid_grant" }),
+      new Response("<html>Bad gateway</html>", { status: 502 }),
+    );
+
+    const dead = await myob.refresh("r1").catch((e) => e);
+    const down = await myob.refresh("r1").catch((e) => e);
+
+    expect(dead).toMatchObject({ reconnectRequired: true, retryable: false });
+    expect(down).toMatchObject({ reconnectRequired: false, retryable: true });
   });
 });
 

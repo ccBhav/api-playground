@@ -39,7 +39,7 @@ describe.skipIf(process.env.MYOB_LIVE !== "1")("live MYOB (read-only)", () => {
   });
 
   test("lists company files, including the connected one", async () => {
-    const files = await api.listCompanyFiles();
+    const files = await api.companyFiles.list();
 
     expect(Array.isArray(files)).toBe(true);
     expect(files.map((file) => file.Id)).toContain(saved.businessId);

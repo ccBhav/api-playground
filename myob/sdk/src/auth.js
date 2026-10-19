@@ -10,10 +10,11 @@ const { parseBody } = require("./body");
 const { MyobAuthError } = require("./errors");
 const { checkOptions, required, requiredOrEnv, toLogger } = require("./options");
 const { toRateLimiter } = require("./rateLimiter");
-const { isExpired, toTokens } = require("./tokens");
+const { fromStored, isExpired, toTokens } = require("./tokens");
 const { fetchWithTimeout, userAgentFor } = require("./transport");
 
 /** @typedef {import("./tokens").MyobTokens} MyobTokens */
+/** @typedef {import("./tokens").StoredMyobTokens} StoredMyobTokens */
 /** @typedef {import("./options").MyobLogger} MyobLogger */
 /** @typedef {import("./rateLimiter").RateLimiter} RateLimiter */
 /** @typedef {import("./rateLimiter").RateLimitSetting} RateLimitSetting */
@@ -59,12 +60,12 @@ const { fetchWithTimeout, userAgentFor } = require("./transport");
 
 /**
  * @typedef {Object} ConnectOptions
- * @property {Partial<MyobTokens>} tokens - Stored tokens (needs at least `refreshToken`).
+ * @property {StoredMyobTokens} tokens - Stored tokens (needs at least `refreshToken`).
  * @property {(tokens: MyobTokens) => unknown} [onRefresh] - Persist new tokens here. It is awaited;
  *   if it throws, the error reaches the caller, but the connection keeps the new tokens so it
  *   stays usable.
  * @property {number} [skewSeconds] - Refresh this many seconds before expiry. Defaults to 60.
- * @property {() => Promise<Partial<MyobTokens> | null | undefined>} [loadTokens] - Read this
+ * @property {() => Promise<StoredMyobTokens | null | undefined>} [loadTokens] - Read this
  *   company's tokens from your database. Needed when more than one process (API servers, workers)
  *   can refresh the same company: before refreshing, and after an `invalid_grant`, the connection
  *   reloads and adopts tokens another process saved instead of using a dead refresh token.
@@ -103,7 +104,7 @@ const TOKEN_REQUEST_KEYS = ["timeoutMs", "signal"];
 const CALLBACK_KEYS = ["expectedState", ...TOKEN_REQUEST_KEYS];
 
 /** Epoch ms of `expiresAt` (Date, ISO string or epoch ms), or 0 when missing or invalid. */
-const expiryOf = (/** @type {Partial<MyobTokens> | null | undefined} */ tokens) => {
+const expiryOf = (/** @type {StoredMyobTokens | null | undefined} */ tokens) => {
   const time = tokens?.expiresAt ? new Date(tokens.expiresAt).getTime() : 0;
   return Number.isNaN(time) ? 0 : time;
 };
@@ -297,7 +298,7 @@ const createMyobAuth = (config = {}) => {
     checkOptions("connect", options, CONNECT_KEYS, logger);
     const tokens = required("connect", options, "tokens");
     const { onRefresh, skewSeconds = DEFAULT_EXPIRY_SKEW_SECONDS, loadTokens, withRefreshLock } = options;
-    let current = /** @type {MyobTokens} */ ({ ...tokens });
+    let current = fromStored(tokens);
     /** @type {Promise<MyobTokens> | null} */
     let inFlight = null;
 
@@ -310,7 +311,7 @@ const createMyobAuth = (config = {}) => {
       const stored = await loadTokens();
       if (!stored?.refreshToken || stored.refreshToken === current.refreshToken) return false;
       if (expiryOf(stored) <= expiryOf(current)) return false;
-      current = /** @type {MyobTokens} */ ({ ...stored });
+      current = fromStored(stored);
       logger.debug("MYOB tokens reloaded from storage", { expiresAt: new Date(expiryOf(current)).toISOString() });
       return true;
     };
@@ -320,6 +321,7 @@ const createMyobAuth = (config = {}) => {
       if (!current.refreshToken) {
         throw new MyobAuthError(
           "Access token expired and no refresh token is stored; the user must reconnect",
+          { code: "no_refresh_token" },
         );
       }
       let next;

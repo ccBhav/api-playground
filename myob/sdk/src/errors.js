@@ -61,7 +61,11 @@ class MyobAbortError extends MyobError {}
  *
  * `code` is the OAuth error string when MYOB sends one (e.g. `invalid_grant` means the
  * refresh token is dead and the user has to reconnect). `state_mismatch` means the callback's
- * `state` didn't match `expectedState`.
+ * `state` didn't match `expectedState`, and `no_refresh_token` that the token expired with no
+ * refresh token to renew it.
+ *
+ * Branch on `reconnectRequired` rather than on the class: a token request can also fail because
+ * MYOB's OAuth server is down (`retryable`), and that is no reason to disconnect the company.
  */
 class MyobAuthError extends MyobError {
   /**
@@ -78,6 +82,16 @@ class MyobAuthError extends MyobError {
     this.code = code;
     this.description = description;
     this.body = body;
+  }
+
+  /** True when the stored tokens can never work again and the user has to connect to MYOB again. */
+  get reconnectRequired() {
+    return this.code === "invalid_grant" || this.code === "no_refresh_token";
+  }
+
+  /** True when MYOB's OAuth server failed (5xx) or rate-limited (429), so trying later may work. */
+  get retryable() {
+    return this.status === 429 || (this.status !== undefined && this.status >= 500);
   }
 }
 
@@ -129,11 +143,12 @@ class MyobApiError extends MyobError {
   }
 
   /**
-   * True when sending the same request again may succeed (408, 429, rate limits, 5xx). The SDK
-   * retries these itself for GET/PUT/DELETE, and for POST only on rate limits.
+   * True when sending the same request again may succeed (408, 429, rate limits, 5xx apart from
+   * 501 Not Implemented). The SDK retries these itself for GET/PUT/DELETE, and for POST only on
+   * rate limits.
    */
   get retryable() {
-    return this.status === 408 || this.status >= 500;
+    return this.status === 408 || (this.status >= 500 && this.status !== 501);
   }
 }
 
@@ -181,6 +196,13 @@ const parseRetryAfter = (headers) => {
 };
 
 /**
+ * `url` without its query string, for error messages: `$filter` values can hold customer names
+ * and other personal data that shouldn't end up in logs. The full URL stays on `error.url`.
+ * @param {string} url
+ */
+const withoutQuery = (url) => url.split("?")[0];
+
+/**
  * Build the right `MyobApiError` subclass for a failed response.
  * @param {{ method: string, url: string, status: number, statusText?: string, headers: Headers, data: unknown, afterRetry?: boolean }} response
  * @returns {MyobApiError}
@@ -197,7 +219,7 @@ const apiErrorFromResponse = ({ method, url, status, statusText, headers, data, 
   const requestId = REQUEST_ID_HEADERS.map((name) => headers.get(name)).find(Boolean) ?? undefined;
   const detail = summary || (typeof data === "string" ? data.slice(0, 500) : "") || statusText || "";
   const message =
-    `MYOB ${method} ${url} failed (${status}): ${detail}` +
+    `MYOB ${method} ${withoutQuery(url)} failed (${status}): ${detail}` +
     (requestId ? ` (request_id: ${requestId})` : "") +
     (afterRetry ? " (after a retry: an earlier attempt may have succeeded, so re-read before trying again)" : "");
   const details = { status, method, url, errors, body: data, headers, code, requestId, retryAfter: parseRetryAfter(headers), afterRetry };
@@ -227,4 +249,5 @@ module.exports = {
   MyobRateLimitError,
   MyobInternalServerError,
   apiErrorFromResponse,
+  withoutQuery,
 };

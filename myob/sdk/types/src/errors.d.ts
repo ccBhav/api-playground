@@ -73,7 +73,11 @@ export class MyobAbortError extends MyobError {
  *
  * `code` is the OAuth error string when MYOB sends one (e.g. `invalid_grant` means the
  * refresh token is dead and the user has to reconnect). `state_mismatch` means the callback's
- * `state` didn't match `expectedState`.
+ * `state` didn't match `expectedState`, and `no_refresh_token` that the token expired with no
+ * refresh token to renew it.
+ *
+ * Branch on `reconnectRequired` rather than on the class: a token request can also fail because
+ * MYOB's OAuth server is down (`retryable`), and that is no reason to disconnect the company.
  */
 export class MyobAuthError extends MyobError {
     /**
@@ -94,6 +98,10 @@ export class MyobAuthError extends MyobError {
     code: string | undefined;
     description: string | undefined;
     body: unknown;
+    /** True when the stored tokens can never work again and the user has to connect to MYOB again. */
+    get reconnectRequired(): boolean;
+    /** True when MYOB's OAuth server failed (5xx) or rate-limited (429), so trying later may work. */
+    get retryable(): boolean;
 }
 /**
  * One entry of MYOB's `Errors` array.
@@ -150,8 +158,9 @@ export class MyobApiError extends MyobError {
     retryAfter: number | undefined;
     afterRetry: boolean;
     /**
-     * True when sending the same request again may succeed (408, 429, rate limits, 5xx). The SDK
-     * retries these itself for GET/PUT/DELETE, and for POST only on rate limits.
+     * True when sending the same request again may succeed (408, 429, rate limits, 5xx apart from
+     * 501 Not Implemented). The SDK retries these itself for GET/PUT/DELETE, and for POST only on
+     * rate limits.
      */
     get retryable(): boolean;
 }
@@ -184,3 +193,9 @@ export function apiErrorFromResponse({ method, url, status, statusText, headers,
     data: unknown;
     afterRetry?: boolean;
 }): MyobApiError;
+/**
+ * `url` without its query string, for error messages: `$filter` values can hold customer names
+ * and other personal data that shouldn't end up in logs. The full URL stays on `error.url`.
+ * @param {string} url
+ */
+export function withoutQuery(url: string): string;

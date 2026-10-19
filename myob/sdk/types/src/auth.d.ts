@@ -1,4 +1,5 @@
 export type MyobTokens = import("./tokens").MyobTokens;
+export type StoredMyobTokens = import("./tokens").StoredMyobTokens;
 export type MyobLogger = import("./options").MyobLogger;
 export type RateLimiter = import("./rateLimiter").RateLimiter;
 export type RateLimitSetting = import("./rateLimiter").RateLimitSetting;
@@ -80,7 +81,7 @@ export type ConnectOptions = {
     /**
      * - Stored tokens (needs at least `refreshToken`).
      */
-    tokens: Partial<MyobTokens>;
+    tokens: StoredMyobTokens;
     /**
      * - Persist new tokens here. It is awaited;
      * if it throws, the error reaches the caller, but the connection keeps the new tokens so it
@@ -97,7 +98,7 @@ export type ConnectOptions = {
      * can refresh the same company: before refreshing, and after an `invalid_grant`, the connection
      * reloads and adopts tokens another process saved instead of using a dead refresh token.
      */
-    loadTokens?: (() => Promise<Partial<MyobTokens> | null | undefined>) | undefined;
+    loadTokens?: (() => Promise<StoredMyobTokens | null | undefined>) | undefined;
     /**
      * - Run `refresh` while
      * holding a lock shared by every process for this company (e.g. a Redis or Mongo lock). With

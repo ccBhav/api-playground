@@ -10,7 +10,7 @@ describe("createMockMyob", () => {
     const { items } = await client.employees.list();
     const employee = await client.employees.retrieve("e-1");
     const created = await client.jobs.create({ Number: "100" });
-    const files = await client.listCompanyFiles();
+    const files = await client.companyFiles.list();
 
     expect(items).toHaveLength(3);
     expect(items[0]).toMatchObject({ IsIndividual: true, UID: expect.stringMatching(/^[0-9a-f-]{36}$/) });
@@ -115,5 +115,26 @@ describe("createFactories", () => {
     expect(first.FirstName).toBe("Pita");
     expect(again).toEqual(first);
     expect(fake.timesheet().Lines?.[0].Entries).toHaveLength(5);
+  });
+});
+
+describe("createMockMyob generic routes", () => {
+  test("onRequest handles paths the typed operations don't cover", async () => {
+    const { client, mock } = createMockMyob();
+    mock.onRequest("GET", "Sale/Order/Item").reply(200, { Items: [{ UID: "o1" }] });
+
+    const page = await client.list("Sale/Order/Item", { top: 5 });
+
+    expect(page.items).toEqual([{ UID: "o1" }]);
+    expect(mock.calls("GET Sale/Order/Item")).toHaveLength(1);
+  });
+
+  test("an unmatched request is a 501 API error naming onRequest, not a connection error", async () => {
+    const { client } = createMockMyob({ client: { maxRetries: 2 } });
+
+    const error = await client.get("Sale/Order").catch((e) => e);
+
+    expect(error.status).toBe(501);
+    expect(error.message).toMatch(/mock.onRequest/);
   });
 });

@@ -6,7 +6,8 @@ export type MyobClient = ReturnType<typeof createMyobClient>;
  */
 export type MockRequest = {
     /**
-     * - e.g. `"employees.list"`.
+     * - e.g. `"employees.list"`, or `"GET Sale/Order/Item"` for a route
+     * added with `onRequest`.
      */
     operation: string;
     method: string;
@@ -83,6 +84,13 @@ export type MyobMock = {
     operations: readonly string[];
     on: (operation: string) => MockHandlers;
     /**
+     * - Handle a path the typed
+     * operations don't cover, as called through the generic methods (`api.get("Sale/Order/Item")`).
+     * `path` is relative to the company file and matched exactly, without the query string. Its
+     * calls are recorded under the operation `"<METHOD> <path>"`. Checked before the typed operations.
+     */
+    onRequest: (method: string, path: string) => MockHandlers;
+    /**
      * - Requests received, in order.
      */
     calls: (operation?: string) => MockRequest[];
@@ -92,7 +100,7 @@ export type MyobMock = {
      */
     pending: () => string[];
     /**
-     * - Drop all handlers and recorded calls.
+     * - Drop all handlers, `onRequest` routes and recorded calls.
      */
     reset: () => void;
 };
@@ -119,8 +127,8 @@ export type Operation = {
  * A real `createMyobClient` over a fake `fetch`, for unit-testing code that uses the SDK without
  * calling MYOB. URL building, response parsing, paging and error classes all run for real; the
  * mock only decides which response comes back. Unhandled operations get a realistic default
- * response from `fake`, and a request that matches no operation fails instead of reaching the
- * network.
+ * response from `fake`. A request that matches no operation never reaches the network: it gets a
+ * 501, which the client throws as a (non-retried) `MyobInternalServerError` naming the request.
  *
  * @param {CreateMockMyobOptions} [options]
  * @returns {{ client: MyobClient, mock: MyobMock, fake: MyobFactories }}

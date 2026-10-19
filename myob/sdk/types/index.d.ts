@@ -25,6 +25,7 @@ export type MyobClient = ReturnType<typeof createMyobClient>;
 export type MyobErrorDetail = import("./src/errors").MyobErrorDetail;
 export type MyobLogger = import("./src/options").MyobLogger;
 export type MyobTokens = import("./src/tokens").MyobTokens;
+export type StoredMyobTokens = import("./src/tokens").StoredMyobTokens;
 export type RateLimiter = import("./src/rateLimiter").RateLimiter;
 export type RateLimitOptions = import("./src/rateLimiter").RateLimitOptions;
 export type RateLimitSetting = import("./src/rateLimiter").RateLimitSetting;

@@ -196,7 +196,7 @@ const routes = {
 
   "GET /files": async (_req, res, { saved }) => {
     if (!saved) return notConnected(res);
-    const files = await clientFor(saved).listCompanyFiles();
+    const files = await clientFor(saved).companyFiles.list();
     const rows = files
       .map(
         (file) => `<tr><td>${esc(file.Name)}</td><td>${esc(file.ProductVersion)}</td><td>${

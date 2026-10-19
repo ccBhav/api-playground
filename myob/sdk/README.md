@@ -175,7 +175,7 @@ you made yourself.
 | `tokens`                 | with `auth` | Stored tokens. Their `businessId` is used if `businessId` isn't given. |
 | `onRefresh`, `skewSeconds`, `loadTokens`, `withRefreshLock` | no | With `auth`: passed to `connect`. |
 | `connection`             | one of   | From `myob.connect(...)`.                                          |
-| `businessId`             | mostly   | The company file. Every call except `listCompanyFiles()` needs it. |
+| `businessId`             | mostly   | The company file. Every call except `companyFiles.list()` needs it. |
 | `companyFileCredentials` | no       | `{ username, password }`, only for files that ask for their own login. Sent as `x-myobapi-cftoken`. |
 | `baseUrl`                | no       | Defaults to `API_BASE_URL`.                                        |
 | `timeoutMs`              | no       | Per attempt. Default `60000`.                                      |
@@ -209,7 +209,7 @@ Each one has the same methods:
 
 | Method                              | Returns                                                         |
 | ----------------------------------- | --------------------------------------------------------------- |
-| `list(query?)`                      | One page: `{ items, count, nextPageLink, response: { status, headers } }`. |
+| `list(query?)`                      | One page: `{ items, count, nextPageLink, nextPage(), response: { status, headers } }`. `nextPage()` fetches the next page (typed the same, with the same request options) or resolves `null` on the last one. |
 | `iterate(query?)`                   | Async iterator over every record, following `NextPageLink`.      |
 | `all(query?)`                       | Every record as an array. Prefer `iterate` for big collections.  |
 | `retrieve(uid)`                     | One record.                                                      |
@@ -238,8 +238,9 @@ documents, e.g. `"2026-10-12T00:00:00"`):
 
 #### Company
 
-`api.company.retrieve()` returns the company file's details. `api.listCompanyFiles()` returns the
-company files this login can see, and doesn't need `businessId`.
+`api.company.retrieve()` returns the company file's details. `api.companyFiles.list()` returns the
+company files this login can see, and doesn't need `businessId`. (`api.listCompanyFiles()` still
+works but is deprecated.)
 
 #### Generic methods
 
@@ -262,7 +263,10 @@ The client also exposes `connection`, so `api.connection.getTokens()` gives you 
 UIDs and `businessId` are URI-encoded for you.
 
 `query` takes the OData options `top` (max 1000, MYOB default 400), `skip`, `filter` and `orderBy`,
-sent as `$top`, `$skip`, `$filter` and `$orderby`. Other keys are sent as-is.
+sent as `$top`, `$skip`, `$filter` and `$orderby`. Other keys are sent as-is. MYOB ignores
+parameters it doesn't know, so a typo would quietly return every record: the SDK warns (once per
+key) when a list query key looks like a misspelt OData option (`fitler`, `orderby`, `$filter`), or
+is a request option such as `timeoutMs` passed in the query instead of the options argument.
 
 `RESOURCES` has the paths of the common resources (`RESOURCES.CUSTOMERS`, `RESOURCES.TIMESHEETS`, ...).
 
@@ -348,9 +352,12 @@ createMyobClient({
 ```
 
 `ctx` has `method`, `url`, `attempt` (1 for the first try) and `state`, an object that carries from
-`onRequest` to `onResponse`/`onError` for that attempt. `onResponse` adds `status`, `headers` and
-`durationMs`, and fires for error statuses too. `onError` adds `error` and `durationMs`. A hook
-that throws is logged as a warning and doesn't fail the request.
+`onRequest` to `onResponse`/`onError` for that attempt. Each attempt fires `onRequest`, then exactly
+one of `onResponse` or `onError`. `onResponse` adds `status`, `headers` and `durationMs`, and fires
+for error statuses too. `onError` adds `error` and `durationMs`; it also fires when the attempt
+fails before anything is sent, i.e. the access token couldn't be refreshed or the `signal` fired
+while waiting for a rate-limit slot. A hook that throws is logged as a warning and doesn't fail the
+request.
 
 ### Logging
 
@@ -377,7 +384,9 @@ True if the access token is missing, expired, or within `skewSeconds` (default 6
 ```
 
 The object is plain and safe to store as-is. When you hand it back, `expiresAt` can be a `Date`,
-an ISO string or epoch milliseconds, so whatever your database returns will work. If MYOB leaves
+an ISO string or epoch milliseconds, so whatever your database returns will work. The input type is
+`StoredMyobTokens` (every field optional, `expiresAt?: Date | string | number`), so TypeScript
+accepts tokens read from JSON without a cast; `connection.getTokens()` always gives back a `Date`. If MYOB leaves
 `expires_in` out of a token response, the SDK assumes the documented 20 minutes.
 
 ## Errors
@@ -405,7 +414,9 @@ MyobError
 | Property      | Meaning                                                        |
 | ------------- | -------------------------------------------------------------- |
 | `status`      | HTTP status (not set for errors in the redirect).              |
-| `code`        | OAuth error, e.g. `invalid_grant`, `access_denied`, or `state_mismatch`. |
+| `code`        | OAuth error, e.g. `invalid_grant`, `access_denied`; or `state_mismatch`, or `no_refresh_token` (the token expired and none is stored). |
+| `reconnectRequired` | `true` for `invalid_grant` and `no_refresh_token`: the stored tokens are dead and the user must connect again. |
+| `retryable`   | `true` when MYOB's OAuth server failed (5xx) or rate-limited (429). Don't disconnect the company for these; try later. |
 | `description` | OAuth `error_description`, if MYOB sent one.                   |
 | `body`        | The raw response body (parsed JSON when possible).             |
 
@@ -417,7 +428,7 @@ MyobError
 | `code`       | The first `Errors[].Name`, e.g. `OAuthTokenIsInvalid`.                      |
 | `errors`     | MYOB's `Errors` array of `{ Name, Message, AdditionalDetails, ErrorCode, Severity }`. |
 | `requestId`  | From the response headers, when MYOB sends one. Quote it to MYOB support.  |
-| `retryable`  | `true` for 408, 429, rate limits and 5xx. The client has already retried these where it was safe to. |
+| `retryable`  | `true` for 408, 429, rate limits and 5xx other than 501. The client has already retried these where it was safe to. |
 | `retryAfter` | Seconds, from `Retry-After`.                                               |
 | `afterRetry` | `true` when an earlier attempt of this request may have succeeded. See [Retries](#retries). |
 | `method`, `url`, `headers`, `body` | The request, plus the raw response headers and body.  |
@@ -431,8 +442,10 @@ try {
   if (error instanceof MyobConflictError) {
     // Someone else changed it (or our own earlier attempt did: see error.afterRetry).
     // Re-read, re-apply, retry.
-  } else if (error instanceof MyobAuthError && error.code === "invalid_grant") {
+  } else if (error instanceof MyobAuthError && error.reconnectRequired) {
     // The refresh token is dead (revoked, expired, or already used). The user must reconnect.
+  } else if (error instanceof MyobAuthError && error.retryable) {
+    // MYOB's OAuth server is having trouble. Keep the connection and try again later.
   }
   throw error;
 }
@@ -468,12 +481,17 @@ expect(mock.pending()).toEqual([]);                // every handler was used
   resource), `timesheets.list/retrieve/update`, `company.retrieve` and `companyFiles.list`.
   `mock.operations` lists them all. The generic methods (`api.list(RESOURCES.EMPLOYEES)`) match the
   same operations.
+- **Other paths:** `mock.onRequest("GET", "Sale/Order/Item")` takes the same handlers, for paths you
+  call through the generic methods. The path is relative to the company file and matched exactly
+  (without the query string); calls are recorded as `mock.calls("GET Sale/Order/Item")`.
 - **Handlers:** `reply(status, body | (req) => body, headers?)`, `replyOnce(...)` (queued in order,
   ahead of any `reply`), `replyError(status, { name?, message?, requestId? })` in MYOB's error
   shape, `replyPages([[...], [...]])` linked by `NextPageLink`, `networkError()` and `timeout()`
   (both take `{ once: true }`).
 - **Defaults:** an operation without a handler gets a realistic success response built by `fake`.
-  A request that matches no operation fails with a clear error and never reaches the network.
+  A request that matches no operation never reaches the network: it gets a 501, which the client
+  throws as a `MyobInternalServerError` (not retried) whose message names the request and
+  `mock.onRequest`.
 - **`req`** (in computed replies and `mock.calls()`) has `operation`, `method`, `url`,
   `params.uid`, `query` and the parsed `body`.
 - **`fake`** has seeded factories typed against the SDK's record types: `employee`, `customer`,

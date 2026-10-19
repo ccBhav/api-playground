@@ -64,6 +64,30 @@ const editDistance = (a, b) => {
 const warnedKeys = new Set();
 
 /**
+ * The name in `allowed` closest to `key` (ignoring case), if any is close enough to be a typo.
+ * @param {string} key
+ * @param {readonly string[]} allowed
+ * @param {number} [maxDistance]
+ */
+const closestName = (key, allowed, maxDistance = Math.max(3, Math.floor(key.length / 3))) =>
+  allowed
+    .map((name) => ({ name, distance: editDistance(key.toLowerCase(), name.toLowerCase()) }))
+    .filter(({ distance }) => distance <= maxDistance)
+    .sort((a, b) => a.distance - b.distance)[0]?.name;
+
+/**
+ * Warn once per key, so a loop doesn't flood the logs.
+ * @param {Required<MyobLogger>} logger
+ * @param {string} id
+ * @param {string} message
+ */
+const warnOnce = (logger, id, message) => {
+  if (warnedKeys.has(id)) return;
+  warnedKeys.add(id);
+  logger.warn(message);
+};
+
+/**
  * Warn (once per key) about option keys the SDK doesn't know, suggesting the closest valid one.
  * Without a compiler, this is how a JS caller finds out `timout` was a typo.
  *
@@ -74,14 +98,35 @@ const warnedKeys = new Set();
  */
 const checkOptions = (where, options, allowed, logger) => {
   for (const key of Object.keys(options ?? {})) {
-    if (allowed.includes(key) || warnedKeys.has(`${where}:${key}`)) continue;
-    warnedKeys.add(`${where}:${key}`);
-    const [closest] = allowed
-      .map((name) => ({ name, distance: editDistance(key.toLowerCase(), name.toLowerCase()) }))
-      .filter(({ distance }) => distance <= Math.max(3, Math.floor(key.length / 3)))
-      .sort((a, b) => a.distance - b.distance);
-    logger.warn(`${where}: unknown option "${key}"${closest ? ` (did you mean "${closest.name}"?)` : ""}`);
+    if (allowed.includes(key)) continue;
+    const closest = closestName(key, allowed);
+    warnOnce(logger, `${where}:${key}`, `${where}: unknown option "${key}"${closest ? ` (did you mean "${closest}"?)` : ""}`);
   }
 };
 
-module.exports = { toLogger, required, requiredOrEnv, checkOptions };
+/**
+ * A list query sends unknown keys to MYOB as-is (e.g. `StartDate`), and MYOB ignores ones it
+ * doesn't know, so a typo like `fitler` would silently return every record. Warn (once per key)
+ * when a key looks like a misspelt OData option, or is a request option in the wrong argument.
+ *
+ * @param {string} where
+ * @param {Record<string, unknown> | undefined} query
+ * @param {readonly string[]} queryKeys - The OData keys, e.g. `filter`.
+ * @param {readonly string[]} requestKeys - Request option names, e.g. `timeoutMs`.
+ * @param {Required<MyobLogger>} logger
+ */
+const checkQuery = (where, query, queryKeys, requestKeys, logger) => {
+  for (const key of Object.keys(query ?? {})) {
+    if (queryKeys.includes(key)) continue;
+    if (requestKeys.includes(key)) {
+      warnOnce(logger, `${where}:${key}`, `${where}: "${key}" is a request option, so it was sent to MYOB as a query parameter; pass it in the options argument instead`);
+      continue;
+    }
+    const closest = closestName(key.replace(/^\$/, ""), queryKeys, 2);
+    if (closest) {
+      warnOnce(logger, `${where}:${key}`, `${where}: "${key}" isn't a query option the SDK knows, so it was sent to MYOB as-is (did you mean "${closest}"?)`);
+    }
+  }
+};
+
+module.exports = { toLogger, required, requiredOrEnv, checkOptions, checkQuery };

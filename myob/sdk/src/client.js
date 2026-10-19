@@ -7,7 +7,7 @@ const {
   MyobRateLimitError,
   apiErrorFromResponse,
 } = require("./errors");
-const { checkOptions, required, toLogger } = require("./options");
+const { checkOptions, checkQuery, required, toLogger } = require("./options");
 const { toRateLimiter } = require("./rateLimiter");
 const { RESOURCE_PATHS } = require("./resources");
 const { USER_AGENT, fetchWithTimeout, retryDelayMs, sleep, userAgentFor } = require("./transport");
@@ -28,7 +28,7 @@ const { USER_AGENT, fetchWithTimeout, retryDelayMs, sleep, userAgentFor } = requ
  */
 
 /**
- * A company file from `listCompanyFiles()`.
+ * A company file from `companyFiles.list()`.
  * @typedef {{ Id: string, Name?: string, Uri?: string, [field: string]: unknown }} MyobCompanyFile
  */
 
@@ -61,13 +61,16 @@ const { USER_AGENT, fetchWithTimeout, retryDelayMs, sleep, userAgentFor } = requ
  */
 
 /**
- * No response: connection error, timeout or abort.
- * @typedef {RequestContext & { error: MyobError, durationMs: number }} ErrorContext
+ * No response: connection error, timeout or abort, or the attempt failed before it was sent (the
+ * access token couldn't be refreshed, or the caller aborted while waiting for a rate-limit slot).
+ * `error` is the error the call throws: a `MyobError`, or whatever your `onRefresh` threw.
+ * @typedef {RequestContext & { error: Error, durationMs: number }} ErrorContext
  */
 
 /**
- * Observability hooks, called for every attempt (retries included). Their return values are
- * ignored, and an exception in one is logged as a warning instead of failing the request.
+ * Observability hooks, called for every attempt (retries included). `onRequest` fires first, then
+ * exactly one of `onResponse` or `onError`. Their return values are ignored, and an exception in
+ * one is logged as a warning instead of failing the request.
  *
  * @typedef {Object} MyobHooks
  * @property {(context: RequestContext) => unknown} [onRequest]
@@ -100,6 +103,8 @@ const { USER_AGENT, fetchWithTimeout, retryDelayMs, sleep, userAgentFor } = requ
  * @property {T[]} items
  * @property {number | undefined} count - Total matching records, when MYOB sends it.
  * @property {string | null} nextPageLink - Absolute URL of the next page, or null on the last one.
+ * @property {() => Promise<Page<T> | null>} nextPage - Fetch the next page (with the same request
+ *   options), or null on the last one.
  * @property {RawResponse} response
  */
 
@@ -151,13 +156,13 @@ const { USER_AGENT, fetchWithTimeout, retryDelayMs, sleep, userAgentFor } = requ
  * @typedef {Object} MyobClientConfig
  * @property {MyobConnection} [connection] - From `createMyobAuth(...).connect(...)`.
  * @property {MyobAuth} [auth] - From `createMyobAuth(...)`; use with `tokens`.
- * @property {Partial<MyobTokens> & { businessId?: string }} [tokens] - Stored tokens; their
+ * @property {import("./tokens").StoredMyobTokens & { businessId?: string }} [tokens] - Stored tokens; their
  *   `businessId` is used when `businessId` isn't given.
  * @property {(tokens: MyobTokens) => unknown} [onRefresh] - With `auth`: persist refreshed tokens.
  * @property {number} [skewSeconds] - With `auth`: see `connect`.
  * @property {import("./auth").ConnectOptions["loadTokens"]} [loadTokens] - With `auth`: see `connect`.
  * @property {import("./auth").ConnectOptions["withRefreshLock"]} [withRefreshLock] - With `auth`: see `connect`.
- * @property {string} [businessId] - The company file. Needed for everything except `listCompanyFiles`.
+ * @property {string} [businessId] - The company file. Needed for everything except `companyFiles.list`.
  * @property {{ username: string, password?: string }} [companyFileCredentials] - Only for company
  *   files that ask for their own login; sent as `x-myobapi-cftoken`.
  * @property {string} [baseUrl] - Defaults to `API_BASE_URL`.
@@ -186,6 +191,21 @@ const ODATA_KEYS = /** @type {Record<string, string>} */ ({
 // Methods that are safe to resend after a lost response. MYOB has no idempotency keys, so POST
 // is only retried when the gateway rate-limited it, which means MYOB never processed it.
 const IDEMPOTENT_METHODS = new Set(["GET", "HEAD", "PUT", "DELETE"]);
+
+/**
+ * Set a header, replacing one already there under any casing: a plain object would otherwise
+ * keep both `User-Agent` and `user-agent`, and `fetch` joins them into one value.
+ * @param {Record<string, string>} headers
+ * @param {string} name
+ * @param {string} value
+ */
+const setHeader = (headers, name, value) => {
+  const lower = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key !== name && key.toLowerCase() === lower) delete headers[key];
+  }
+  headers[name] = value;
+};
 
 /**
  * `x-myobapi-cftoken` value: Base64 of `username:password` for the company file.
@@ -223,6 +243,22 @@ const periodQuery = (where, period) => {
     }
   }
   return { StartDate: period?.startDate, EndDate: period?.endDate };
+};
+
+/**
+ * MYOB takes the period of a timesheet PUT from its body, so check it is there before sending.
+ * @param {string} where
+ * @param {Timesheet} timesheet
+ */
+const checkTimesheet = (where, timesheet) => {
+  if (typeof timesheet !== "object" || timesheet === null) {
+    throw new TypeError(`${where}: \`timesheet\` must be an object`);
+  }
+  for (const name of /** @type {const} */ (["StartDate", "EndDate"])) {
+    if (typeof timesheet[name] !== "string" || !timesheet[name]) {
+      throw new TypeError(`${where}: \`timesheet.${name}\` is required`);
+    }
+  }
 };
 
 /**
@@ -372,23 +408,41 @@ const createMyobClient = (config) => {
     let outcomeUnknown = false;
 
     for (let attempt = 1; ; attempt++) {
-      await rateLimiter?.acquire(signal);
-      const authHeaders = await connection.headers();
       /** @type {Record<string, string>} */
-      const headers = { ...authHeaders, "User-Agent": userAgent, ...extraHeaders };
-      if (cfToken) headers["x-myobapi-cftoken"] = cfToken;
-      if (body !== undefined) headers["Content-Type"] = "application/json";
+      const hookHeaders = {};
       /** @type {RequestContext} */
       const context = {
         method,
         url,
         attempt,
         state: {},
-        setHeader: (name, value) => {
-          headers[name] = value;
-        },
+        setHeader: (name, value) => setHeader(hookHeaders, name, value),
       };
       callHook("onRequest", hooks.onRequest, context);
+
+      // Waiting for a slot and getting a fresh token are part of the attempt, so a failure in
+      // either (an abort, or a refresh MYOB refused) reaches `onError` too.
+      const attemptStarted = Date.now();
+      /** @type {Record<string, string>} */
+      let authHeaders;
+      try {
+        await rateLimiter?.acquire(signal);
+        authHeaders = await connection.headers();
+      } catch (error) {
+        callHook("onError", hooks.onError, { ...context, error, durationMs: Date.now() - attemptStarted });
+        throw error;
+      }
+      /** @type {Record<string, string>} */
+      const headers = {};
+      const extra = /** @type {[string, string][]} */ ([
+        ...Object.entries(authHeaders),
+        ["User-Agent", userAgent],
+        ...Object.entries(extraHeaders ?? {}),
+        ...(cfToken ? [["x-myobapi-cftoken", cfToken]] : []),
+        ...(body !== undefined ? [["Content-Type", "application/json"]] : []),
+        ...Object.entries(hookHeaders),
+      ]);
+      for (const [name, value] of extra) setHeader(headers, name, value);
 
       const started = Date.now();
       let result;
@@ -487,12 +541,21 @@ const createMyobClient = (config) => {
     return response.data;
   };
 
+  const companyFiles = {
+    /**
+     * Company files this login can see. Doesn't need `businessId`.
+     * @param {RequestOptions} [options]
+     * @returns {Promise<MyobCompanyFile[]>}
+     */
+    list: (options) => get(`${baseUrl}/`, undefined, options),
+  };
+
   /**
-   * Company files this login can see. Doesn't need `businessId`.
+   * @deprecated Use `companyFiles.list()`. Kept until 1.0.
    * @param {RequestOptions} [options]
    * @returns {Promise<MyobCompanyFile[]>}
    */
-  const listCompanyFiles = (options) => get(`${baseUrl}/`, undefined, options);
+  const listCompanyFiles = (options) => companyFiles.list(options);
 
   /**
    * One page of a collection.
@@ -503,12 +566,16 @@ const createMyobClient = (config) => {
    * @returns {Promise<Page<T>>}
    */
   const list = async (path, query, options) => {
+    checkQuery("list query", query, Object.keys(ODATA_KEYS), REQUEST_KEYS, logger);
     /** @type {RawResponse & { data: any }} */
     const { status, headers, data } = await request("GET", path, { ...options, query });
+    /** @type {string | null} */
+    const nextPageLink = data?.NextPageLink ?? null;
     return {
       items: data?.Items ?? [],
       count: data?.Count,
-      nextPageLink: data?.NextPageLink ?? null,
+      nextPageLink,
+      nextPage: async () => (nextPageLink ? list(nextPageLink, undefined, options) : null),
       response: { status, headers },
     };
   };
@@ -523,12 +590,11 @@ const createMyobClient = (config) => {
    * @returns {AsyncGenerator<T, void, undefined>}
    */
   async function* iterate(path, query, options) {
-    /** @type {Page<T>} */
+    /** @type {Page<T> | null} */
     let page = await list(path, query, options);
-    yield* page.items;
-    while (page.nextPageLink) {
-      page = await list(page.nextPageLink, undefined, options);
+    while (page) {
       yield* page.items;
+      page = await page.nextPage();
     }
   }
 
@@ -654,8 +720,10 @@ const createMyobClient = (config) => {
         periodQuery("timesheets.retrieve", period),
         options,
       ),
-    update: async (employeeUid, timesheet, options) =>
-      update(RESOURCES.TIMESHEETS, employeeUid, timesheet, options),
+    update: async (employeeUid, timesheet, options) => {
+      checkTimesheet("timesheets.update", timesheet);
+      return update(RESOURCES.TIMESHEETS, employeeUid, timesheet, options);
+    },
   };
 
   const company = {
@@ -673,6 +741,7 @@ const createMyobClient = (config) => {
     ...resources,
     timesheets,
     company,
+    companyFiles,
     request,
     get,
     listCompanyFiles,

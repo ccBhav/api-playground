@@ -10,7 +10,8 @@ const { createFactories } = require("./factories");
 /**
  * A request the mock received, parsed.
  * @typedef {Object} MockRequest
- * @property {string} operation - e.g. `"employees.list"`.
+ * @property {string} operation - e.g. `"employees.list"`, or `"GET Sale/Order/Item"` for a route
+ *   added with `onRequest`.
  * @property {string} method
  * @property {string} url
  * @property {{ uid?: string }} params - `uid` is the record UID (the employee UID for timesheets).
@@ -51,10 +52,14 @@ const { createFactories } = require("./factories");
  * @typedef {Object} MyobMock
  * @property {readonly string[]} operations - Every operation name `on` accepts.
  * @property {(operation: string) => MockHandlers} on
+ * @property {(method: string, path: string) => MockHandlers} onRequest - Handle a path the typed
+ *   operations don't cover, as called through the generic methods (`api.get("Sale/Order/Item")`).
+ *   `path` is relative to the company file and matched exactly, without the query string. Its
+ *   calls are recorded under the operation `"<METHOD> <path>"`. Checked before the typed operations.
  * @property {(operation?: string) => MockRequest[]} calls - Requests received, in order.
  * @property {() => string[]} pending - Operations with handlers that were set up but never used;
  *   usually a sign of a broken test.
- * @property {() => void} reset - Drop all handlers and recorded calls.
+ * @property {() => void} reset - Drop all handlers, `onRequest` routes and recorded calls.
  */
 
 /**
@@ -106,8 +111,8 @@ const ERROR_NAMES = {
  * A real `createMyobClient` over a fake `fetch`, for unit-testing code that uses the SDK without
  * calling MYOB. URL building, response parsing, paging and error classes all run for real; the
  * mock only decides which response comes back. Unhandled operations get a realistic default
- * response from `fake`, and a request that matches no operation fails instead of reaching the
- * network.
+ * response from `fake`. A request that matches no operation never reaches the network: it gets a
+ * 501, which the client throws as a (non-retried) `MyobInternalServerError` naming the request.
  *
  * @param {CreateMockMyobOptions} [options]
  * @returns {{ client: MyobClient, mock: MyobMock, fake: MyobFactories }}
@@ -123,6 +128,8 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
   let handlers = new Map();
   /** @type {MockRequest[]} */
   let received = [];
+  /** @type {Map<string, { method: string, path: string }>} */
+  let routes = new Map();
 
   /** @type {Record<string, (overrides?: any) => any>} */
   const factories = {
@@ -153,6 +160,10 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
     }
     if (!url.pathname.startsWith(companyPath)) return undefined;
     const rest = decodeURIComponent(pathname.slice(companyPath.length));
+    const routeName = `${method} ${rest}`;
+    if (routes.has(routeName)) {
+      return { operation: { name: routeName, method, path: rest, kind: "collection", resource: "custom" }, params: {} };
+    }
     const exact = OPERATIONS.find((o) => o.kind === "collection" && o.method === method && o.path === rest);
     if (exact) return { operation: exact, params: {} };
     const slash = rest.lastIndexOf("/");
@@ -204,7 +215,7 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
 
   /** @param {string} name */
   const assertOperation = (name) => {
-    if (!OPERATION_NAMES.includes(name)) {
+    if (!OPERATION_NAMES.includes(name) && !routes.has(name)) {
       throw new TypeError(`myob-sdk/testing: unknown operation "${name}". Known: ${OPERATION_NAMES.join(", ")}`);
     }
   };
@@ -222,7 +233,14 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
     const url = new URL(String(input));
     const method = (init.method ?? "GET").toUpperCase();
     const found = match(method, url);
-    if (!found) throw new Error(`myob-sdk/testing: no MYOB operation matches ${method} ${url}`);
+    if (!found) {
+      // A response rather than a throw: the client would report a throw as a connection error.
+      const message = `myob-sdk/testing: no MYOB operation matches ${method} ${url}; handle it with mock.onRequest(method, path)`;
+      return new Response(JSON.stringify({ Errors: [{ Name: "MockNoOperation", Message: message, Severity: "Error" }] }), {
+        status: 501,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
     const { operation, params } = found;
     /** @type {MockRequest} */
     const request = {
@@ -237,7 +255,11 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
     received.push(request);
     const handler = nextHandler(operation.name);
     if (handler) handler.used = true;
-    const { status, body, headers } = handler ? handler.respond(request) : defaultResponse(request, operation);
+    const { status, body, headers } = handler
+      ? handler.respond(request)
+      : routes.has(operation.name)
+        ? { status: 200, body: undefined, headers: undefined }
+        : defaultResponse(request, operation);
     return new Response(body === undefined ? null : JSON.stringify(body), {
       status,
       headers: { "Content-Type": "application/json", ...headers },
@@ -301,10 +323,22 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
     return builder;
   };
 
+  /** @type {MyobMock["onRequest"]} */
+  const onRequest = (method, path) => {
+    if (typeof method !== "string" || typeof path !== "string" || !path) {
+      throw new TypeError("myob-sdk/testing: onRequest(method, path) needs a method and a path");
+    }
+    const route = { method: method.toUpperCase(), path: path.replace(/^\/+|\/+$/g, "").split("?")[0] };
+    const name = `${route.method} ${route.path}`;
+    routes.set(name, route);
+    return on(name);
+  };
+
   /** @type {MyobMock} */
   const mock = {
     operations: OPERATION_NAMES,
     on,
+    onRequest,
     calls: (name) => {
       if (name !== undefined) assertOperation(name);
       return received.filter((request) => name === undefined || request.operation === name);
@@ -316,6 +350,7 @@ const createMockMyob = ({ seed = 1, businessId = "00000000-0000-4000-8000-000000
     reset: () => {
       handlers = new Map();
       received = [];
+      routes = new Map();
     },
   };
 

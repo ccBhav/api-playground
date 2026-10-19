@@ -93,13 +93,13 @@ describe("get", () => {
   });
 });
 
-describe("listCompanyFiles", () => {
+describe("companyFiles.list", () => {
   test("hits the API root and works without a businessId", async () => {
     const { api, call } = setup([jsonResponse(200, [{ Id: "biz-1" }])], {
       businessId: undefined,
     });
 
-    expect(await api.listCompanyFiles()).toEqual([{ Id: "biz-1" }]);
+    expect(await api.companyFiles.list()).toEqual([{ Id: "biz-1" }]);
     expect(call().url).toBe(`${BASE}/`);
   });
 });
@@ -504,7 +504,7 @@ describe("custom baseUrl", () => {
       { baseUrl: local },
     );
 
-    expect(await api.listCompanyFiles()).toEqual([{ Id: "f1" }]);
+    expect(await api.companyFiles.list()).toEqual([{ Id: "f1" }]);
     expect(await api.all("Contact")).toEqual([{ UID: "1" }, { UID: "2" }]);
     expect(call(2).url).toBe(`${local}/biz-1/Contact?$skip=1`);
   });
@@ -731,5 +731,95 @@ describe("typed resources", () => {
 
     expect(api).not.toHaveProperty("getById");
     expect(api).not.toHaveProperty("remove");
+  });
+});
+
+describe("review fixes", () => {
+  test("warns when a list query key looks like a misspelt OData option", async () => {
+    const logger = { warn: vi.fn() };
+    const { api } = setup([jsonResponse(200, { Items: [] })], { logger });
+
+    await api.customers.list({ fitler: "IsActive eq true", StartDate: "2026-10-12T00:00:00" });
+
+    expect(logger.warn).toHaveBeenCalledTimes(1);
+    expect(logger.warn.mock.calls[0][0]).toMatch(/"fitler" isn't a query option.*did you mean "filter"/);
+  });
+
+  test("warns when a request option is passed in the query", async () => {
+    const logger = { warn: vi.fn() };
+    const { api } = setup([jsonResponse(200, { Items: [] })], { logger });
+
+    await api.customers.list({ maxRetries: 0 });
+
+    expect(logger.warn.mock.calls[0][0]).toMatch(/"maxRetries" is a request option/);
+  });
+
+  test("page.nextPage() fetches the next page with the same options, then null", async () => {
+    const next = `${BASE}/biz-1/Contact/Employee?$top=1&$skip=1`;
+    const onResponse = vi.fn();
+    const { api, call } = setup([
+      jsonResponse(200, { Items: [{ UID: "e1" }], NextPageLink: next }),
+      jsonResponse(200, { Items: [{ UID: "e2" }], NextPageLink: null }),
+    ]);
+
+    const first = await api.employees.list({ top: 1 }, { onResponse });
+    const second = await first.nextPage();
+
+    expect(call(1).url).toBe(next);
+    expect(second?.items).toEqual([{ UID: "e2" }]);
+    expect(await second?.nextPage()).toBeNull();
+    expect(onResponse).toHaveBeenCalledTimes(2);
+  });
+
+  test("onError sees a token refresh that fails before the request is sent", async () => {
+    const onError = vi.fn();
+    const refreshFailed = new Error("refresh failed");
+    const { api, fetch } = setup([], {
+      hooks: { onError },
+      connection: { headers: async () => { throw refreshFailed; } },
+    });
+
+    await expect(api.get("A")).rejects.toBe(refreshFailed);
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onError).toHaveBeenCalledWith(expect.objectContaining({ attempt: 1, error: refreshFailed }));
+  });
+
+  test("a per-request header replaces the SDK's under any casing", async () => {
+    const { api, call } = setup([jsonResponse(200, {})]);
+
+    await api.get("A", undefined, { headers: { "user-agent": "custom/1" } });
+
+    const names = Object.keys(call().headers).filter((name) => name.toLowerCase() === "user-agent");
+    expect(names).toEqual(["user-agent"]);
+    expect(call().headers["user-agent"]).toBe("custom/1");
+  });
+
+  test("error messages leave out the query string, which error.url keeps", async () => {
+    const { api } = setup([jsonResponse(400, { Errors: [{ Name: "ValidationError" }] })], { maxRetries: 0 });
+
+    const error = await api.customers.list({ filter: "LastName eq 'Smith'" }).catch((e) => e);
+
+    expect(error.message).not.toMatch(/Smith/);
+    expect(error.url).toMatch(/Smith/);
+  });
+
+  test("a 501 is not retried", async () => {
+    const { api, fetch } = setup([jsonResponse(501, {}), jsonResponse(200, {})]);
+
+    await expect(api.get("A")).rejects.toBeInstanceOf(MyobInternalServerError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("timesheets.update needs StartDate and EndDate in the body", async () => {
+    const { api, fetch } = setup();
+
+    await expect(api.timesheets.update("emp-1", { Lines: [] })).rejects.toThrow(/`timesheet.StartDate` is required/);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("listCompanyFiles still works as a deprecated alias", async () => {
+    const { api } = setup([jsonResponse(200, [{ Id: "biz-1" }])]);
+
+    expect(await api.listCompanyFiles()).toEqual([{ Id: "biz-1" }]);
   });
 });

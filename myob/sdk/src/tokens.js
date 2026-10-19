@@ -1,4 +1,4 @@
-const { DEFAULT_EXPIRY_SKEW_SECONDS } = require("./constants");
+const { DEFAULT_EXPIRY_SKEW_SECONDS, DEFAULT_TOKEN_LIFETIME_SECONDS } = require("./constants");
 
 /**
  * Tokens in the shape the SDK hands out and accepts back. Safe to store as-is
@@ -18,13 +18,18 @@ const { DEFAULT_EXPIRY_SKEW_SECONDS } = require("./constants");
  * @param {number} [now] - Epoch ms the response was received.
  * @returns {MyobTokens}
  */
-const toTokens = (raw, now = Date.now()) => ({
-  accessToken: raw.access_token,
-  refreshToken: raw.refresh_token,
-  expiresAt: new Date(now + Number(raw.expires_in) * 1000),
-  scope: raw.scope,
-  tokenType: raw.token_type,
-});
+const toTokens = (raw, now = Date.now()) => {
+  // Without a usable expires_in, expiresAt would be an Invalid Date and every call would refresh.
+  const seconds = Number(raw.expires_in);
+  const lifetime = Number.isFinite(seconds) && seconds > 0 ? seconds : DEFAULT_TOKEN_LIFETIME_SECONDS;
+  return {
+    accessToken: raw.access_token,
+    refreshToken: raw.refresh_token,
+    expiresAt: new Date(now + lifetime * 1000),
+    scope: raw.scope,
+    tokenType: raw.token_type,
+  };
+};
 
 /**
  * True when the access token is missing, expired, or within `skewSeconds` of expiring.

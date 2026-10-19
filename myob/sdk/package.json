@@ -4,13 +4,38 @@
   "private": true,
   "description": "Small MYOB AccountRight / Business API client for Node",
   "main": "index.js",
+  "types": "types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./index.js"
+    },
+    "./testing": {
+      "types": "./types/testing.d.ts",
+      "default": "./testing.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "testing.js",
+    "src",
+    "types"
+  ],
   "engines": {
-    "node": ">=24"
+    "node": ">=20.3"
   },
   "scripts": {
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:live": "MYOB_LIVE=1 vitest run test/live.test.js",
+    "typecheck": "tsc --noEmit -p . && tsc --noEmit -p test/types",
+    "build:types": "rm -rf types && tsc -p .",
+    "check:types-committed": "npm run build:types && git diff --exit-code -- types && test -z \"$(git status --porcelain -- types)\"",
+    "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
+    "@types/node": "^24.19.2",
+    "typescript": "^5.9.3",
     "vitest": "^4.0.15"
   }
 }

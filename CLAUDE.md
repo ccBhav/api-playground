@@ -17,7 +17,15 @@ Two tools are used side by side per API directory:
 
 ## Structure
 
-- `quickbooks/` — QuickBooks API exploration (currently empty; first integration to be built out)
+- `quickbooks/` — QuickBooks API exploration (currently empty)
+- `payworks/` — Payworks API exploration (TypeScript run directly by Node)
+- `myob/` — MYOB AccountRight API: `sdk/`, a zero-dependency CommonJS SDK
+  (OAuth plus a generic company-file client) destined for `constructionclock-backend` (plain CommonJS JS, so no TypeScript
+  here — use JSDoc for types). `npm start` runs `runner/index.js`, a zero-dependency example web app (connect, pick a company
+  file, browse resources) against real MYOB; `npm run start:ngrok` uses an ngrok redirect URI.
+  `sdk/testing.js` (`myob-sdk/testing`) is a mock client for consumers' unit tests. The committed
+  `sdk/types/` is generated (`npm run build:types`) and CI fails if it drifts from the JSDoc.
+  To walk someone through setting it up, follow `myob/SETUP_TUTORIAL.md`.
 - `wagepoint/` — Wagepoint Public API, same layout and conventions as `myob/`: `sdk/` (CommonJS, JSDoc,
   zero-dependency) and `runner/index.js` (`npm start`). Auth is the OAuth2 client credentials grant, so
   there is no redirect/ngrok step. Built from Wagepoint's PDF quick start (companies, persons, time

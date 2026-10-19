@@ -5,6 +5,12 @@ const API_VERSION = "v2";
 
 /** Seconds before `expiresAt` that a token is already treated as expired. */
 const DEFAULT_EXPIRY_SKEW_SECONDS = 60;
+/** MYOB access tokens last 20 minutes; used if a token response leaves out `expires_in`. */
+const DEFAULT_TOKEN_LIFETIME_SECONDS = 1200;
+const DEFAULT_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_RETRIES = 2;
+/** MYOB allows 8 calls a second per API key. */
+const DEFAULT_REQUESTS_PER_SECOND = 8;
 
 const SCOPE_NAMES = {
   COMPANY_FILE: "sme-company-file",
@@ -55,6 +61,10 @@ module.exports = {
   API_BASE_URL,
   API_VERSION,
   DEFAULT_EXPIRY_SKEW_SECONDS,
+  DEFAULT_TOKEN_LIFETIME_SECONDS,
+  DEFAULT_TIMEOUT_MS,
+  DEFAULT_MAX_RETRIES,
+  DEFAULT_REQUESTS_PER_SECOND,
   SCOPES,
   RESOURCES,
 };

@@ -67,16 +67,13 @@ const forget = () => fs.rm(TOKENS_FILE, { force: true });
 /** Build an API client for the stored connection, persisting tokens whenever they refresh. */
 const clientFor = (saved) => {
   let current = saved;
-  const connection = myob.connect({
-    tokens: saved,
+  return createMyobClient({
+    auth: myob,
+    tokens: saved, // includes businessId
     onRefresh: async (tokens) => {
       current = { ...current, ...tokens };
       await save(current);
     },
-  });
-  return createMyobClient({
-    connection,
-    businessId: saved.businessId,
     companyFileCredentials: process.env.MYOB_CF_USERNAME
       ? { username: process.env.MYOB_CF_USERNAME, password: process.env.MYOB_CF_PASSWORD }
       : undefined,
@@ -227,7 +224,7 @@ const resourceRoute = async (res, { saved, query }, resource, uid) => {
   const api = clientFor(saved);
 
   if (uid) {
-    const record = await api.getById(resourcePath, uid);
+    const record = await api.retrieve(resourcePath, uid);
     return send(
       res,
       200,
@@ -258,7 +255,7 @@ const handleCallback = async (res, query) => {
   if (!pendingStates.delete(state)) {
     return send(res, 400, page("Login failed", `<p class="error">Unknown or reused state. <a href="/connect">Try again</a>.</p>`));
   }
-  const { tokens, businessId } = await myob.handleCallback(query);
+  const { tokens, businessId } = await myob.handleCallback(query, { expectedState: state });
   await save({ ...tokens, businessId });
   redirect(res, "/");
 };

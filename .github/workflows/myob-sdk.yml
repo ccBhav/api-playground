@@ -1,0 +1,43 @@
+name: myob-sdk
+
+on:
+  push:
+    branches: [main]
+    paths: ["myob/sdk/**", ".github/workflows/myob-sdk.yml"]
+  pull_request:
+    paths: ["myob/sdk/**", ".github/workflows/myob-sdk.yml"]
+
+defaults:
+  run:
+    working-directory: myob/sdk
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node: [20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+          cache-dependency-path: myob/sdk/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+
+  public-surface:
+    # The committed types/ is the SDK's public API. Regenerating it must not change anything, so
+    # every change to the surface shows up as a types/ diff in review.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: myob/sdk/package-lock.json
+      - run: npm ci
+      - run: npm run check:types-committed

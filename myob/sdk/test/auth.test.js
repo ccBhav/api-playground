@@ -1,6 +1,6 @@
 import { describe, test, expect, vi, beforeEach, afterEach } from "vitest";
 
-const { createMyobAuth, MyobAuthError, SCOPES, isExpired } = require("..");
+const { createMyobAuth, MyobAuthError, MyobTimeoutError, SCOPES, isExpired } = require("..");
 
 const NOW = new Date("2026-10-13T00:00:00.000Z").getTime();
 
@@ -157,7 +157,7 @@ describe("handleCallback", () => {
       code: "the-code",
       businessId: "biz-1",
       state: "s1",
-    });
+    }, { expectedState: "s1" });
 
     expect(sentForm().code).toBe("the-code");
     expect(result).toMatchObject({
@@ -297,5 +297,224 @@ describe("connect", () => {
     const conn = myob.connect({ tokens: { ...expired, refreshToken: undefined } });
 
     await expect(conn.getAccessToken()).rejects.toBeInstanceOf(MyobAuthError);
+  });
+});
+
+describe("hardening", () => {
+  test("handleCallback rejects a state that doesn't match expectedState, before using the code", async () => {
+    const { myob, fetch } = setup();
+
+    const error = await myob
+      .handleCallback({ code: "c", state: "forged" }, { expectedState: "mine" })
+      .catch((e) => e);
+
+    expect(error).toBeInstanceOf(MyobAuthError);
+    expect(error.code).toBe("state_mismatch");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("handleCallback accepts a matching expectedState", async () => {
+    const { myob } = setup(jsonResponse(200, tokenBody()));
+
+    const { state } = await myob.handleCallback({ code: "c", state: "mine" }, { expectedState: "mine" });
+
+    expect(state).toBe("mine");
+  });
+
+  test("assumes MYOB's 20-minute lifetime when expires_in is missing", async () => {
+    const { myob } = setup(jsonResponse(200, tokenBody({ expires_in: undefined })));
+
+    const tokens = await myob.exchangeCode("c");
+
+    expect(tokens.expiresAt).toEqual(new Date(NOW + 1_200_000));
+  });
+
+  test("times out a token request", async () => {
+    vi.useRealTimers();
+    const fetch = vi.fn(
+      (_url, init) =>
+        new Promise((_resolve, reject) => init.signal.addEventListener("abort", () => reject(init.signal.reason))),
+    );
+    const myob = createMyobAuth({ clientId: "a", clientSecret: "b", redirectUri: "c", timeoutMs: 20, fetch });
+
+    await expect(myob.exchangeCode("code")).rejects.toBeInstanceOf(MyobTimeoutError);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("connect names the missing tokens", () => {
+    const { myob } = setup();
+
+    expect(() => myob.connect({})).toThrow(/connect: `tokens` is required/);
+  });
+
+  test("forceRefresh skips the refresh when the rejected token was already replaced", async () => {
+    const { myob, fetch } = setup(jsonResponse(200, tokenBody({ access_token: "access-2" })));
+    const conn = myob.connect({
+      tokens: { accessToken: "access-1", refreshToken: "r", expiresAt: new Date(NOW + 600_000) },
+    });
+
+    const [first, second] = await Promise.all([conn.forceRefresh("access-1"), conn.forceRefresh("access-1")]);
+    const later = await conn.forceRefresh("access-1");
+
+    expect([first, second, later]).toEqual(["access-2", "access-2", "access-2"]);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("apiVersion overrides x-myobapi-version", async () => {
+    const myob = createMyobAuth({ clientId: "a", clientSecret: "b", redirectUri: "c", apiVersion: "v3" });
+
+    const headers = await myob
+      .connect({ tokens: { accessToken: "t", expiresAt: new Date(NOW + 600_000) } })
+      .headers();
+
+    expect(headers["x-myobapi-version"]).toBe("v3");
+  });
+});
+
+describe("environment variables", () => {
+  const ENV = ["MYOB_CLIENT_ID", "MYOB_CLIENT_SECRET", "MYOB_REDIRECT_URI"];
+  const saved = {};
+  beforeEach(() => {
+    for (const name of ENV) saved[name] = process.env[name];
+  });
+  afterEach(() => {
+    for (const name of ENV) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
+  });
+
+  test("falls back to MYOB_CLIENT_ID, MYOB_CLIENT_SECRET and MYOB_REDIRECT_URI", () => {
+    process.env.MYOB_CLIENT_ID = "env-id";
+    process.env.MYOB_CLIENT_SECRET = "env-secret";
+    process.env.MYOB_REDIRECT_URI = "https://example.com/cb";
+
+    const url = new URL(createMyobAuth().getAuthorizeUrl());
+
+    expect(url.searchParams.get("client_id")).toBe("env-id");
+    expect(url.searchParams.get("redirect_uri")).toBe("https://example.com/cb");
+  });
+
+  test("names the env var when a credential is missing", () => {
+    for (const name of ENV) delete process.env[name];
+
+    expect(() => createMyobAuth({ clientId: "x", redirectUri: "y" })).toThrow(/MYOB_CLIENT_SECRET/);
+  });
+});
+
+describe("token request options", () => {
+  test("exchangeCode honours an aborted signal without calling MYOB", async () => {
+    const { myob, fetch } = setup();
+
+    const error = await myob.exchangeCode("c", { signal: AbortSignal.abort() }).catch((e) => e);
+
+    expect(error.name).toBe("MyobAbortError");
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  test("handleCallback passes request options through to the token request", async () => {
+    const { myob, fetch } = setup(jsonResponse(200, tokenBody()));
+    const controller = new AbortController();
+
+    await myob.handleCallback({ code: "c" }, { signal: controller.signal, timeoutMs: 1000 });
+
+    expect(fetch.mock.calls[0][1].signal).toBeInstanceOf(AbortSignal);
+  });
+});
+
+describe("connect across processes", () => {
+  const expired = { accessToken: "a-1", refreshToken: "r-1", expiresAt: new Date(NOW - 1000) };
+  const newer = { accessToken: "a-2", refreshToken: "r-2", expiresAt: new Date(NOW + 1_200_000) };
+
+  test("adopts newer tokens another process saved instead of refreshing", async () => {
+    const { myob, fetch } = setup();
+    const onRefresh = vi.fn();
+
+    const conn = myob.connect({ tokens: expired, onRefresh, loadTokens: async () => ({ ...newer, expiresAt: newer.expiresAt.toISOString() }) });
+
+    expect(await conn.getAccessToken()).toBe("a-2");
+    expect(fetch).not.toHaveBeenCalled();
+    expect(onRefresh).not.toHaveBeenCalled();
+  });
+
+  test("ignores stored tokens that are older than the ones it holds", async () => {
+    const { myob, fetch } = setup(jsonResponse(200, tokenBody({ access_token: "a-3", refresh_token: "r-3" })));
+    const older = { accessToken: "a-0", refreshToken: "r-0", expiresAt: new Date(NOW - 5000) };
+
+    const conn = myob.connect({ tokens: expired, loadTokens: async () => older });
+
+    expect(await conn.getAccessToken()).toBe("a-3");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  test("recovers from invalid_grant when another process refreshed first", async () => {
+    const { myob } = setup(jsonResponse(400, { error: "invalid_grant" }));
+    let stored = expired;
+    const loadTokens = vi.fn(async () => stored);
+    const conn = myob.connect({ tokens: expired, loadTokens });
+    // The other process saves its tokens while our refresh is in flight.
+    const pending = conn.getAccessToken();
+    stored = newer;
+
+    expect(await pending).toBe("a-2");
+    expect(loadTokens).toHaveBeenCalledTimes(2);
+  });
+
+  test("still throws invalid_grant when storage has nothing newer", async () => {
+    const { myob } = setup(jsonResponse(400, { error: "invalid_grant" }));
+
+    const conn = myob.connect({ tokens: expired, loadTokens: async () => expired });
+
+    await expect(conn.getAccessToken()).rejects.toMatchObject({ code: "invalid_grant" });
+  });
+
+  test("runs the refresh inside withRefreshLock", async () => {
+    const { myob } = setup(jsonResponse(200, tokenBody({ access_token: "a-3" })));
+    const events = [];
+    const withRefreshLock = async (fn) => {
+      events.push("lock");
+      try {
+        return await fn();
+      } finally {
+        events.push("unlock");
+      }
+    };
+    const loadTokens = async () => {
+      events.push("load");
+      return expired;
+    };
+
+    const conn = myob.connect({ tokens: expired, loadTokens, withRefreshLock });
+
+    expect(await conn.getAccessToken()).toBe("a-3");
+    expect(events).toEqual(["lock", "load", "unlock"]);
+  });
+});
+
+describe("connection extras", () => {
+  test("shares one rate limiter per auth, and carries appName in the User-Agent", async () => {
+    const fetch = vi.fn().mockResolvedValue(jsonResponse(200, tokenBody()));
+    const myob = createMyobAuth({ clientId: "i", clientSecret: "s", redirectUri: "r", appName: "constructionclock/1.0", fetch });
+
+    const a = myob.connect({ tokens: { refreshToken: "x" } });
+    const b = myob.connect({ tokens: { refreshToken: "y" } });
+    await myob.refresh("x");
+
+    expect(a.rateLimiter).toBeDefined();
+    expect(a.rateLimiter).toBe(b.rateLimiter);
+    expect(a.userAgent).toMatch(/ constructionclock\/1\.0$/);
+    expect(fetch.mock.calls[0][1].headers["User-Agent"]).toMatch(/ constructionclock\/1\.0$/);
+  });
+
+  test("rateLimit: false turns pacing off", () => {
+    const myob = createMyobAuth({ clientId: "i", clientSecret: "s", redirectUri: "r", rateLimit: false });
+
+    expect(myob.connect({ tokens: { refreshToken: "x" } }).rateLimiter).toBeUndefined();
+  });
+
+  test("the deprecated myob.isExpired alias is gone", () => {
+    const { myob } = setup();
+
+    expect(myob).not.toHaveProperty("isExpired");
   });
 });

@@ -8,6 +8,7 @@
  * Tokens and the chosen businessId live in .tokens.json, standing in for the database row a real
  * app keeps per company. If the file needs its own login, set MYOB_CF_USERNAME / MYOB_CF_PASSWORD.
  */
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { execFile } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -64,6 +65,48 @@ const save = (connection) =>
 
 const forget = () => fs.rm(TOKENS_FILE, { force: true });
 
+/** The API calls made while handling the current page request, shown raw at the bottom of the page. */
+const apiCalls = new AsyncLocalStorage();
+
+const SECRET_HEADERS = /^(authorization|x-myobapi-cftoken)$/i;
+
+const parseBody = (text) => {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
+};
+
+/**
+ * A `fetch` that records each API request and its response (one entry per attempt, so retries show)
+ * into the current page's `apiCalls`. Only the API client uses this, not auth, so token requests
+ * (which carry the client secret) are never recorded, and the bearer and company file tokens are
+ * redacted.
+ * @type {typeof fetch}
+ */
+const recordingFetch = async (url, init = {}) => {
+  const headers = Object.fromEntries(
+    [...new Headers(init.headers)].map(([name, value]) => [name, SECRET_HEADERS.test(name) ? "[redacted]" : value]),
+  );
+  const call = { request: { method: init.method ?? "GET", url: String(url), headers, body: parseBody(init.body) } };
+  apiCalls.getStore()?.push(call);
+  try {
+    const response = await fetch(url, init);
+    call.response = {
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers),
+      body: parseBody(await response.clone().text()),
+    };
+    return response;
+  } catch (error) {
+    call.error = String(error?.message ?? error);
+    throw error;
+  }
+};
+
 /** Build an API client for the stored connection, persisting tokens whenever they refresh. */
 const clientFor = (saved) => {
   let current = saved;
@@ -77,6 +120,7 @@ const clientFor = (saved) => {
     companyFileCredentials: process.env.MYOB_CF_USERNAME
       ? { username: process.env.MYOB_CF_USERNAME, password: process.env.MYOB_CF_PASSWORD }
       : undefined,
+    fetch: recordingFetch,
   });
 };
 
@@ -98,7 +142,15 @@ const page = (title, body) => `<!doctype html>
   .button { display: inline-block; padding: .5rem 1rem; background: #6100a5; color: #fff; border-radius: 4px; text-decoration: none; }
   .muted { color: #777; }
 </style></head>
-<body><nav><a href="/">Home</a><a href="/files">Company files</a></nav><h1>${esc(title)}</h1>${body}</body></html>`;
+<body><nav><a href="/">Home</a><a href="/files">Company files</a></nav><h1>${esc(title)}</h1>${body}${apiCallsHtml()}</body></html>`;
+
+/** Every request/response from `recordingFetch` for this page, as raw JSON. */
+const apiCallsHtml = () => {
+  const calls = apiCalls.getStore();
+  return calls?.length
+    ? `<h2>Raw API calls (${calls.length})</h2><pre>${esc(JSON.stringify(calls, null, 2))}</pre>`
+    : "";
+};
 
 /** A short display name for any MYOB record. */
 const labelOf = (record) =>
@@ -260,7 +312,9 @@ const handleCallback = async (res, query) => {
   redirect(res, "/");
 };
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => apiCalls.run([], () => handle(req, res)));
+
+const handle = async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   const query = url.searchParams;
   try {
@@ -280,7 +334,7 @@ const server = http.createServer(async (req, res) => {
     console.error(error);
     send(res, error instanceof MyobApiError ? 502 : 500, page("Something went wrong", errorHtml(error)));
   }
-});
+};
 
 server.listen(port, () => {
   const local = `http://localhost:${port}/`;

@@ -11,6 +11,7 @@
  *
  * Logging time writes real, pending time entries to the company's payroll.
  */
+const { AsyncLocalStorage } = require("node:async_hooks");
 const { execFile } = require("node:child_process");
 const { randomUUID } = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -70,26 +71,53 @@ const getConnection = async () => {
   return connection;
 };
 
-/**
- * Records the URL and body of each POST to the API into `sent`, so the page can show what was sent.
- * Only the API client uses this, not auth, so the token request (which carries the client secret)
- * is never recorded.
- * @param {{ url: string, body: unknown }[]} sent
- * @returns {typeof fetch}
- */
-const recordingFetch = (sent) => (url, init = {}) => {
-  if (init.method === "POST") {
-    sent.push({ url: String(url), body: init.body === undefined ? undefined : JSON.parse(init.body) });
+/** The API calls made while handling the current page request, shown raw at the bottom of the page. */
+const apiCalls = new AsyncLocalStorage();
+
+const SECRET_HEADERS = /^authorization$/i;
+
+const parseBody = (text) => {
+  if (!text) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
   }
-  return fetch(url, init);
 };
 
-const clientFor = async (state, sent = []) =>
+/**
+ * A `fetch` that records each API request and its response (one entry per attempt, so retries show)
+ * into the current page's `apiCalls`. Only the API client uses this, not auth, so the token request
+ * (which carries the client secret) is never recorded, and the bearer token is redacted.
+ * @type {typeof fetch}
+ */
+const recordingFetch = async (url, init = {}) => {
+  const headers = Object.fromEntries(
+    [...new Headers(init.headers)].map(([name, value]) => [name, SECRET_HEADERS.test(name) ? "[redacted]" : value]),
+  );
+  const call = { request: { method: init.method ?? "GET", url: String(url), headers, body: parseBody(init.body) } };
+  apiCalls.getStore()?.push(call);
+  try {
+    const response = await fetch(url, init);
+    call.response = {
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers),
+      body: parseBody(await response.clone().text()),
+    };
+    return response;
+  } catch (error) {
+    call.error = String(error?.message ?? error);
+    throw error;
+  }
+};
+
+const clientFor = async (state) =>
   createWagepointClient({
     connection: await getConnection(),
     companyId: state.companyId ?? process.env.WAGEPOINT_COMPANY_ID ?? undefined,
     baseUrl,
-    fetch: recordingFetch(sent),
+    fetch: recordingFetch,
   });
 
 // --- HTML -------------------------------------------------------------------------------------
@@ -113,7 +141,15 @@ const page = (title, body) => `<!doctype html>
   input { font: inherit; padding: .3rem .4rem; } .muted { color: #777; } .warn { background: #fff4e5; padding: .5rem .75rem; }
 </style></head>
 <body><nav><a href="/">Home</a><a href="/companies">Companies</a><a href="/persons">People</a><a href="/time-entries">Time entries</a></nav>
-<h1>${esc(title)}</h1>${body}</body></html>`;
+<h1>${esc(title)}</h1>${body}${apiCallsHtml()}</body></html>`;
+
+/** Every request/response from `recordingFetch` for this page, as raw JSON. */
+const apiCallsHtml = () => {
+  const calls = apiCalls.getStore();
+  return calls?.length
+    ? `<h2>Raw API calls (${calls.length})</h2><pre>${esc(JSON.stringify(calls, null, 2))}</pre>`
+    : "";
+};
 
 const table = (columns, rows) => {
   if (!rows.length) return `<p class="muted">No records.</p>`;
@@ -144,17 +180,6 @@ const errorHtml = (error) => {
   }
   return `<pre class="error">${esc(error.stack ?? error)}</pre>`;
 };
-
-/** The POSTs recorded by `recordingFetch`; more than one means the SDK retried. */
-const sentHtml = (sent) =>
-  sent.length
-    ? `<h2>Sent to Wagepoint</h2>${sent
-        .map(
-          ({ url, body }) =>
-            `<p><code>POST ${esc(url)}</code></p>${body === undefined ? "" : `<pre>${esc(JSON.stringify(body, null, 2))}</pre>`}`,
-        )
-        .join("")}`
-    : "";
 
 const noCompany = (res) =>
   send(res, 200, page("No company selected", `<p><a class="button" href="/companies">Pick a company</a></p>`));
@@ -308,8 +333,7 @@ const routes = {
   },
 
   "POST /time-entries": async (req, res, { state }) => {
-    const sent = [];
-    const api = await clientFor(state, sent);
+    const api = await clientFor(state);
     if (!api.companyId) return noCompany(res);
     const form = await readForm(req);
     const entry = {
@@ -318,17 +342,9 @@ const routes = {
       hours: Number(form.get("hours")),
       notes: form.get("notes") || undefined,
     };
-    let created;
-    try {
-      created = await api.createTimeEntries([entry], {
-        idempotencyKey: form.get("idempotency_key") || undefined,
-      });
-    } catch (error) {
-      console.error(error);
-      const status = error instanceof WagepointApiError ? 502 : 500;
-      return send(res, status, page("Something went wrong", `${errorHtml(error)}${sentHtml(sent)}`));
-    }
-    const { items, idempotencyKey } = created;
+    const { items, idempotencyKey } = await api.createTimeEntries([entry], {
+      idempotencyKey: form.get("idempotency_key") || undefined,
+    });
     const verify = `/time-entries?from_date=${encodeURIComponent(entry.work_date)}&to_date=${encodeURIComponent(entry.work_date)}&person_id=${encodeURIComponent(entry.person_id)}`;
     send(
       res,
@@ -337,8 +353,7 @@ const routes = {
         "Time entry created",
         `<p class="muted">Idempotency-Key: <code>${esc(idempotencyKey)}</code></p>
         <pre>${esc(JSON.stringify(items, null, 2))}</pre>
-        <p><a class="button" href="${esc(verify)}">Read it back</a></p>
-        ${sentHtml(sent)}`,
+        <p><a class="button" href="${esc(verify)}">Read it back</a></p>`,
       ),
     );
   },
@@ -355,7 +370,9 @@ const isSameOrigin = (req) => {
   }
 };
 
-const server = http.createServer(async (req, res) => {
+const server = http.createServer((req, res) => apiCalls.run([], () => handle(req, res)));
+
+const handle = async (req, res) => {
   const url = new URL(req.url, "http://localhost");
   try {
     if (req.method !== "GET" && !isSameOrigin(req)) {
@@ -368,7 +385,7 @@ const server = http.createServer(async (req, res) => {
     console.error(error);
     send(res, error instanceof WagepointApiError ? 502 : 500, page("Something went wrong", errorHtml(error)));
   }
-});
+};
 
 server.listen(port, () => {
   const local = `http://localhost:${port}/`;
